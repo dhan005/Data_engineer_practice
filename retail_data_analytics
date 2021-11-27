@@ -1,0 +1,100 @@
+
+import pandas as pd 
+import numpy as np 
+import seaborn as sns 
+import sweetviz as sv 
+import csv
+import matplotlib.pyplot as plt
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+#add pyspark libraries for identifying raw data files 
+from pyspark.sql import SparkSession 
+from pyspark.sql.functions import current_timestamp, col, trim, lower, f, when
+from pyspark.sql.types import StructType,StructField, StringType, IntegerType, DateType, FloatType, BooleanType
+from pyspark.sql.column import Column
+%matplotlib inline 
+
+#get path for all three datasets 
+pd.set_option('display.max.columns', 60)
+df1 = pd.read_csv(r'/Users/Dhan004/Desktop/Retail Data/stores data-set.csv', low_memory=False)
+df2 = pd.read_csv(r'/Users/Dhan004/Desktop/Retail Data/sales data-set.csv', low_memory=False)
+df3 = pd.read_csv(r'/Users/Dhan004/Desktop/Retail Data/Features data set.csv', low_memory=False)
+
+#identify columns and data types
+info1 = df1.info()
+info2 = df2.info()
+info3 = df3.info()
+
+#use sweetviz for eda analysis 
+#advert_report = sv.analyze(df1)
+#advert_report.show_html('store.html')
+
+#for pyspark libraries 
+spark = SparkSession.builder.appName('Retail Data Analytics').enableHiveSupport().getOrCreate()
+#adding timestamp
+dateTimeObj = datetime.now()
+timestampStr = dateTimeObj.strftime("%d-%b-%Y (%H:%M:%S.%f)")
+
+#file paths 
+dfps1 = r'/Users/Dhan004/Desktop/Retail Data/stores data-set.csv'
+dfps2 = r'/Users/Dhan004/Desktop/Retail Data/sales data-set.csv'
+dfps3 = r'/Users/Dhan004/Desktop/Retail Data/Features data set.csv'
+
+#make changes to the datatypes if deem neccessary for consistent flow
+schema = StructType([
+    StructField('Store', IntegerType(), 'True'), 
+    StructField('Dept', IntegerType(), 'True'), 
+    StructField('Date', DateType(), 'True'), 
+    StructField('Weekly_Sales', FloatType(), 'True'), 
+    StructField('IsHoliday', BooleanType(), 'True')
+])
+
+#read analyze the data for pyspark1
+df_ps1 = spark.read.format('csv').options(header=True, inferSchema=True).load(dfps1)
+#add ingestion date - this will help identified when the files have been ingested to our database
+df_ps1 = df_ps1.withColumn('Ingestion_Date', current_timestamp())
+#save raw in a temporary location 
+df_ps1.write.format('parquet').mode('overwrite').save('/Users/Dhan004/Desktop/Retail Data/Raw')
+print('df_ps1: file saved on raw folder at', timestampStr)
+
+
+#same process for dfps2 and dfps3 
+df_ps2 = spark.read.format('csv').options(header=True, inferSchema=True).load(dfps2)
+df_ps2 = df_ps2.withColumn('Ingestion_Date', current_timestamp())
+df_ps2.write.format('parquet').mode('overwrite').save('/Users/Dhan004/Desktop/Retail Data/Raw')
+print('df_ps2: file saved on raw folder at', timestampStr)
+
+df_ps3 = spark.read.format('csv').options(header=True, inferSchema=True).load(dfps3)
+df_ps3 = df_ps3.withColumn('Ingestion_Date', current_timestamp())
+df_ps3 = df_ps3.withColumn('MarkDown1', when(col('MarkDown1') == 'NA', ''))\
+                           .withColumn('MarkDown2',when(col('MarkDown2') == 'NA', ''))\
+                           .withColumn('MarkDown3',when(col('MarkDown3') == 'NA', ''))\
+                           .withColumn('MarkDown4',when(col('MarkDown4') == 'NA', ''))\
+                           .withColumn('MarkDown5',when(col('MarkDown5') == 'NA', ''))
+print('df_ps3: file saved on raw folder at', timestampStr)
+#filter out holiday vs not holiday weekly sales aggregate data df_ps2
+#total weekly sales - no holiday
+total_weekly_sales = df_ps2.filter(col('IsHoliday') == 'False')
+#total weekly sales - with holiday 
+total_weekly_holiday_sales = df_ps2.filter(col('IsHoliday') == 'true')
+#aggregrate the data - Date and weekly sales 
+total_weekly_sales = total_weekly_sales.groupby('Date', 'Store', 'Dept').sum('Weekly_Sales').sort(col('Date').desc())
+total_weekly_holiday_sales = total_weekly_holiday_sales.groupby('Date', 'Store', 'Dept').sum('Weekly_Sales').sort(col('Date').desc())
+#save aggregated data to a new temp folder 
+#df_ps2
+total_weekly_sales = total_weekly_sales.groupby('Date', 'Store', 'Dept').sum('Weekly_Sales').withColumnRenamed('Sum(Weekly_Sales)', 'Sum_Weekly_Sales')
+total_weekly_sales.createOrReplaceTempView('weekly_total_sales')    
+total_sales = spark.sql("""SELECT * FROM weekly_total_sales""")
+total_sales.write.save("/Users/Dhan004/Desktop/Retail Data/Text")
+#df_ps3
+total_weekly_holiday_sales = total_weekly_holiday_sales.groupby('Date', 'Store', 'Dept').sum('Weekly_Sales').withColumnRenamed('Sum(Weekly_Sales)', 'Sum_Weekly_Sales')
+total_weekly_holiday_sales.createOrReplaceTempView('weekly_total_holiday_sales')    
+total_holiday_sales = spark.sql("""SELECT * FROM weekly_total_holiday_sales""")
+total_holiday_sales.write.save("/Users/Dhan004/Desktop/Retail Data/Text")
+#Merge df_ps2 and df_ps3 by Store and IsHoliday, this will merge two columns into one single column 
+df_merge = df_ps2.join(df_ps3, on=['Store', 'IsHoliday'], how='left_outer')
+df_merge.createOrReplaceTempView('merge_table')
+merged = spark.sql("""SELECT * FROM merge_table""")
+merged.write.save("/Users/Dhan00r/Desktop/Retail Data/Text")
+
